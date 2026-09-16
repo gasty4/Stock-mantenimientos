@@ -849,6 +849,146 @@ function renderAll(){
   else if(state.view==='plan'){ renderPlan(); }
 }
 
+// ================= Copia de seguridad (Excel + Google Drive) =================
+const LS_GDRIVE_CLIENTID = 'mant_gdrive_clientid';
+const LS_GDRIVE_LAST_BACKUP = 'mant_gdrive_last_backup';
+let gTokenClient = null;
+let gAccessToken = null;
+
+function openBackupSheet(){ renderBackupSheet(); openSheet('backupSheet'); }
+
+function renderBackupSheet(){
+  const clientId = localStorage.getItem(LS_GDRIVE_CLIENTID) || '';
+  const lastBackup = localStorage.getItem(LS_GDRIVE_LAST_BACKUP);
+  document.getElementById('backupBody').innerHTML = `
+    <div class="field-label">Excel</div>
+    <button class="primary-btn" id="backupExportExcel" style="margin-top:0;">Exportar a Excel</button>
+    <button class="primary-btn" id="backupImportExcel" style="background:var(--panel-2);color:var(--text);border:1px solid var(--border);">Importar desde Excel</button>
+
+    <div class="field-label">Google Drive</div>
+    ${lastBackup ? `<div class="dist-sum-hint">Última copia en Drive: ${new Date(lastBackup).toLocaleString('es-AR')}</div>` : `<div class="dist-sum-hint">Todavía no hiciste ninguna copia a Drive.</div>`}
+    <input type="text" id="gdriveClientId" placeholder="Client ID de Google (una sola vez)" value="${escapeHtml(clientId)}" style="margin-top:10px;">
+    <button class="link-btn" id="gdriveSaveClientId" style="padding:8px 0;">Guardar Client ID</button>
+    <button class="primary-btn" id="backupToDrive">Hacer copia de seguridad a Drive</button>
+    <button class="primary-btn" id="restoreFromDrive" style="background:var(--panel-2);color:var(--text);border:1px solid var(--border);">Restaurar desde Drive</button>
+    <div class="dist-sum-hint">La copia se guarda como "mantenimientos_backup.json" en tu Google Drive, en la carpeta raíz ("Mi unidad"). Restaurar reemplaza todos los datos actuales de la app por los del backup.</div>
+  `;
+  document.getElementById('backupExportExcel').addEventListener('click', exportarExcel);
+  document.getElementById('backupImportExcel').addEventListener('click', ()=> document.getElementById('importFileInput').click());
+  document.getElementById('gdriveSaveClientId').addEventListener('click', ()=>{
+    const val = document.getElementById('gdriveClientId').value.trim();
+    localStorage.setItem(LS_GDRIVE_CLIENTID, val);
+    gTokenClient = null; // se reconstruye con el nuevo client id
+    alert('Client ID guardado.');
+  });
+  document.getElementById('backupToDrive').addEventListener('click', backupToDrive);
+  document.getElementById('restoreFromDrive').addEventListener('click', restoreFromDrive);
+}
+
+function ensureGoogleAuth(onReady){
+  const clientId = localStorage.getItem(LS_GDRIVE_CLIENTID);
+  if(!clientId){
+    alert('Primero pegá tu Client ID de Google en "Copia de seguridad" y guardalo (una sola vez).');
+    return;
+  }
+  if(typeof google === 'undefined' || !google.accounts || !google.accounts.oauth2){
+    alert('No se pudo cargar el inicio de sesión de Google. Revisá que el celular tenga conexión a internet e intentá de nuevo.');
+    return;
+  }
+  if(!gTokenClient){
+    gTokenClient = google.accounts.oauth2.initTokenClient({
+      client_id: clientId,
+      scope: 'https://www.googleapis.com/auth/drive.file',
+      callback: (resp)=>{
+        if(resp.error){
+          alert('No se pudo iniciar sesión con Google: '+resp.error);
+          return;
+        }
+        gAccessToken = resp.access_token;
+        onReady();
+      }
+    });
+  } else {
+    gTokenClient.callback = (resp)=>{
+      if(resp.error){ alert('No se pudo iniciar sesión con Google: '+resp.error); return; }
+      gAccessToken = resp.access_token;
+      onReady();
+    };
+  }
+  gTokenClient.requestAccessToken({prompt: gAccessToken ? '' : 'consent'});
+}
+
+async function findDriveBackupFile(){
+  const q = encodeURIComponent("name='mantenimientos_backup.json' and trashed=false");
+  const res = await fetch(`https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id,name,modifiedTime)&spaces=drive`, {
+    headers: {Authorization: `Bearer ${gAccessToken}`}
+  });
+  if(!res.ok) throw new Error('No se pudo consultar Google Drive (HTTP '+res.status+').');
+  const data = await res.json();
+  return (data.files && data.files[0]) || null;
+}
+
+function backupToDrive(){
+  ensureGoogleAuth(async ()=>{
+    try{
+      const existing = await findDriveBackupFile();
+      const payload = JSON.stringify({tasks: TASKS, dist: DIST, exportado: new Date().toISOString()});
+      const boundary = 'mant_backup_boundary';
+      const metadata = {name:'mantenimientos_backup.json', mimeType:'application/json'};
+      const body =
+        `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${existing?'{}':JSON.stringify(metadata)}\r\n`+
+        `--${boundary}\r\nContent-Type: application/json\r\n\r\n${payload}\r\n--${boundary}--`;
+      const url = existing
+        ? `https://www.googleapis.com/upload/drive/v3/files/${existing.id}?uploadType=multipart`
+        : `https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart`;
+      const res = await fetch(url, {
+        method: existing ? 'PATCH' : 'POST',
+        headers: {Authorization:`Bearer ${gAccessToken}`, 'Content-Type': `multipart/related; boundary=${boundary}`},
+        body
+      });
+      if(!res.ok) throw new Error('HTTP '+res.status);
+      localStorage.setItem(LS_GDRIVE_LAST_BACKUP, new Date().toISOString());
+      alert('Copia de seguridad guardada en Google Drive.');
+      renderBackupSheet();
+    }catch(e){
+      console.error(e);
+      alert('No se pudo guardar la copia en Drive. Probá de nuevo o revisá el Client ID.');
+    }
+  });
+}
+
+function restoreFromDrive(){
+  ensureGoogleAuth(async ()=>{
+    try{
+      const existing = await findDriveBackupFile();
+      if(!existing){
+        alert('No encontré ningún "mantenimientos_backup.json" en tu Drive todavía.');
+        return;
+      }
+      const res = await fetch(`https://www.googleapis.com/drive/v3/files/${existing.id}?alt=media`, {
+        headers: {Authorization:`Bearer ${gAccessToken}`}
+      });
+      if(!res.ok) throw new Error('HTTP '+res.status);
+      const data = await res.json();
+      const fecha = existing.modifiedTime ? new Date(existing.modifiedTime).toLocaleString('es-AR') : '';
+      if(!confirm(`Esto va a reemplazar TODOS los datos actuales de la app por los del backup de Drive (guardado el ${fecha}). ¿Confirmás?`)) return;
+      TASKS = Array.isArray(data.tasks) ? data.tasks : [];
+      DIST = data.dist || {};
+      normalizeTasks();
+      saveTasks(TASKS);
+      saveDist(DIST);
+      syncDistancias();
+      processRenewals();
+      closeSheet('backupSheet');
+      renderAll();
+      alert('Datos restaurados desde Google Drive.');
+    }catch(e){
+      console.error(e);
+      alert('No se pudo restaurar desde Drive. Probá de nuevo.');
+    }
+  });
+}
+
 // ================= Exportar a Excel =================
 function exportarExcel(){
   if(typeof XLSX === 'undefined'){
@@ -965,8 +1105,8 @@ document.getElementById('distClose').addEventListener('click', ()=>closeSheet('d
 document.getElementById('planPickerClose').addEventListener('click', ()=>{ closeSheet('planPickerSheet'); renderPlan(); });
 document.getElementById('overlay').addEventListener('click', closeAllSheets);
 document.getElementById('btnSettings').addEventListener('click', openDistSheet);
-document.getElementById('btnExport').addEventListener('click', exportarExcel);
-document.getElementById('btnImport').addEventListener('click', ()=> document.getElementById('importFileInput').click());
+document.getElementById('btnBackup').addEventListener('click', openBackupSheet);
+document.getElementById('backupClose').addEventListener('click', ()=>closeSheet('backupSheet'));
 document.getElementById('importFileInput').addEventListener('change', (e)=>{
   const file = e.target.files[0];
   e.target.value = '';

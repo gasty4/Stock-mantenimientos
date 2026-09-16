@@ -15,6 +15,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<script src="https://accounts.google.com/gsi/client" async defer></script>
 <style>
 :root{
   --bg:#14181C;
@@ -378,13 +379,10 @@ label.chk input{width:17px;height:17px;accent-color:var(--amber);}
         <div class="sub" id="pageSub">Cargando…</div>
       </div>
       <div style="display:flex;gap:8px;">
-        <button class="icon-btn" id="btnImport" title="Importar datos">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+        <button class="icon-btn" id="btnBackup" title="Copia de seguridad">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a5 5 0 0 0-5 5v1.05A5.5 5.5 0 0 0 8.5 19H17a4 4 0 0 0 .5-7.96A5 5 0 0 0 12 2z"/><path d="M12 12v6"/><polyline points="9.5 15.5 12 18 14.5 15.5"/></svg>
         </button>
         <input type="file" id="importFileInput" accept=".xlsx" style="display:none;">
-        <button class="icon-btn" id="btnExport" title="Exportar a Excel">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-        </button>
         <button class="icon-btn" id="btnSettings" title="Distancias">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
         </button>
@@ -505,6 +503,13 @@ label.chk input{width:17px;height:17px;accent-color:var(--amber);}
   <div class="sheet-body" id="dateSheetBody"></div>
 </div>
 
-<script src="./app.js?v=5"></script>
+<!-- Copia de seguridad: Excel + Google Drive -->
+<div class="sheet" id="backupSheet">
+  <div class="sheet-handle"></div>
+  <div class="sheet-head"><h3>Copia de seguridad</h3><button class="link-btn" id="backupClose">Cerrar</button></div>
+  <div class="sheet-body" id="backupBody"></div>
+</div>
+
+<script src="./app.js?v=6"></script>
 </body>
 </html>
