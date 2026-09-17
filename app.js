@@ -885,10 +885,20 @@ function renderBackupSheet(){
   document.getElementById('restoreFromDrive').addEventListener('click', restoreFromDrive);
 }
 
+// Si el campo del Client ID tiene algo escrito pero todavía no se guardó (el usuario
+// se olvidó de tocar "Guardar Client ID"), lo guardamos solos antes de seguir.
+function autoguardarClientIdSiHaceFalta(){
+  const input = document.getElementById('gdriveClientId');
+  if(input && input.value.trim()){
+    localStorage.setItem(LS_GDRIVE_CLIENTID, input.value.trim());
+  }
+}
+
 function ensureGoogleAuth(onReady){
+  autoguardarClientIdSiHaceFalta();
   const clientId = localStorage.getItem(LS_GDRIVE_CLIENTID);
   if(!clientId){
-    alert('Primero pegá tu Client ID de Google en "Copia de seguridad" y guardalo (una sola vez).');
+    alert('Todavía no hay un Client ID de Google cargado. Pegalo en el campo "Client ID de Google" de esta pantalla y volvé a tocar el botón.');
     return;
   }
   if(typeof google === 'undefined' || !google.accounts || !google.accounts.oauth2){
