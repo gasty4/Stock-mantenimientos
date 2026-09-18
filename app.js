@@ -818,7 +818,6 @@ function switchView(view){
   document.getElementById('searchRow').style.display = (view==='plan' || view==='stock') ? 'none' : 'flex';
   document.getElementById('stateChipRow').style.display = (view==='plan' || view==='stock') ? 'none' : 'flex';
   document.getElementById('fabAdd').style.display = (view==='stock') ? 'none' : 'flex';
-  if(view==='stock' && !STOCK_CACHE[state.stockSource]) fetchStockSource(state.stockSource, false);
   renderAll();
 }
 
@@ -912,15 +911,17 @@ function autoguardarClientIdSiHaceFalta(){
   }
 }
 
-function ensureGoogleAuth(onReady){
+function ensureGoogleAuth(onReady, onFail){
   autoguardarClientIdSiHaceFalta();
   const clientId = localStorage.getItem(LS_GDRIVE_CLIENTID);
   if(!clientId){
     alert('Todavía no hay un Client ID de Google cargado. Pegalo en el campo "Client ID de Google" de esta pantalla y volvé a tocar el botón.');
+    if(onFail) onFail();
     return;
   }
   if(typeof google === 'undefined' || !google.accounts || !google.accounts.oauth2){
     alert('No se pudo cargar el inicio de sesión de Google. Revisá que el celular tenga conexión a internet e intentá de nuevo.');
+    if(onFail) onFail();
     return;
   }
   if(!gTokenClient){
@@ -932,6 +933,7 @@ function ensureGoogleAuth(onReady){
       callback: (resp)=>{
         if(resp.error){
           alert('No se pudo iniciar sesión con Google: '+resp.error);
+          if(onFail) onFail();
           return;
         }
         gAccessToken = resp.access_token;
@@ -940,7 +942,7 @@ function ensureGoogleAuth(onReady){
     });
   } else {
     gTokenClient.callback = (resp)=>{
-      if(resp.error){ alert('No se pudo iniciar sesión con Google: '+resp.error); return; }
+      if(resp.error){ alert('No se pudo iniciar sesión con Google: '+resp.error); if(onFail) onFail(); return; }
       gAccessToken = resp.access_token;
       onReady();
     };
@@ -1035,7 +1037,19 @@ function loadStockTerms(){
 }
 function saveStockTerms(t){ localStorage.setItem(LS_STOCK_TERMS, JSON.stringify(t)); }
 let STOCK_TERMS = loadStockTerms();
-const STOCK_CACHE = {}; // key -> {items:[{codigo,descripcion,saldo,ubicacion}], fetchedAt}
+
+// La caché de stock se guarda en el celular: así los datos de la última actualización
+// quedan disponibles aunque cierres la app o recargues la página, sin volver a pedir Google.
+const LS_STOCK_CACHE = 'mant_stock_cache_v1';
+function loadStockCache(){
+  try{ return JSON.parse(localStorage.getItem(LS_STOCK_CACHE)||'{}'); }
+  catch(e){ return {}; }
+}
+function saveStockCache(){
+  try{ localStorage.setItem(LS_STOCK_CACHE, JSON.stringify(STOCK_CACHE)); }catch(e){ /* almacenamiento lleno, no bloqueamos la app */ }
+}
+let STOCK_CACHE = loadStockCache(); // key -> {items, fetchedAt, fileName, lastError?}
+const STOCK_LOADING = {}; // key -> true mientras se está pidiendo a Drive (nunca se persiste)
 state.stockSource = 'General';
 state.stockSearch = '';
 
@@ -1113,7 +1127,7 @@ function renderStockChips(){
     el.addEventListener('click', ()=>{
       state.stockSource = el.dataset.source;
       renderStockChips();
-      fetchStockSource(state.stockSource, false);
+      renderStockList(); // solo muestra lo que ya haya en caché; no dispara login solo/a
     });
   });
 }
@@ -1135,10 +1149,11 @@ function stockItemHtml(item, isGeneral){
 function renderStockList(){
   const source = STOCK_SOURCES.find(s=>s.key===state.stockSource);
   const cached = STOCK_CACHE[state.stockSource];
+  const loading = !!STOCK_LOADING[state.stockSource];
   const container = document.getElementById('stockList');
   const statusEl = document.getElementById('stockStatus');
 
-  if(!cached){
+  if(!cached && !loading){
     statusEl.textContent = '';
     container.innerHTML = emptyStateHtml('Tocá para cargar el stock de "'+source.label+'" desde Google Drive.') +
       `<div style="padding:0 18px;"><button class="primary-btn" id="stockLoadNow">Cargar stock</button></div>`;
@@ -1146,12 +1161,12 @@ function renderStockList(){
     if(btn) btn.addEventListener('click', ()=> fetchStockSource(state.stockSource, false));
     return;
   }
-  if(cached.loading){
+  if(!cached && loading){
     statusEl.textContent = 'Cargando desde Google Drive…';
     container.innerHTML = emptyStateHtml('Cargando…');
     return;
   }
-  if(cached.error){
+  if(cached.error && !cached.items){
     statusEl.textContent = '';
     container.innerHTML = emptyStateHtml(cached.error) +
       `<div style="padding:0 18px;"><button class="primary-btn" id="stockRetry">Reintentar</button></div>`;
@@ -1160,7 +1175,11 @@ function renderStockList(){
     return;
   }
 
-  statusEl.textContent = `Actualizado: ${new Date(cached.fetchedAt).toLocaleString('es-AR')} · ${cached.items.length} ítems`;
+  const fecha = `Actualizado: ${new Date(cached.fetchedAt).toLocaleString('es-AR')} · ${cached.items.length} ítems`;
+  if(loading) statusEl.textContent = 'Actualizando…';
+  else if(cached.lastError) statusEl.textContent = `${fecha} · no se pudo actualizar ahora, mostrando lo último guardado`;
+  else statusEl.textContent = fecha;
+
   const q = state.stockSearch.trim().toLowerCase();
   const filtered = q ? cached.items.filter(it =>
     it.codigo.toLowerCase().includes(q) || it.descripcion.toLowerCase().includes(q)
@@ -1176,25 +1195,33 @@ function renderStockList(){
     (!q && filtered.length>toShow.length ? `<div class="dist-sum-hint" style="padding:10px 18px;">Mostrando ${toShow.length} de ${filtered.length}. Buscá por código o descripción para filtrar.</div>` : '');
 }
 
+// Solo pide iniciar sesión con Google cuando no hay datos guardados todavía para esa
+// fuente, o cuando el usuario tocó explícitamente "Actualizar" (force=true).
 function fetchStockSource(key, force){
-  if(!force && STOCK_CACHE[key] && !STOCK_CACHE[key].error){ renderStockList(); return; }
-  STOCK_CACHE[key] = {loading:true};
+  if(!force && STOCK_CACHE[key] && STOCK_CACHE[key].items){ renderStockList(); return; }
+  if(STOCK_LOADING[key]) return; // ya hay una carga en curso para esta fuente
+  STOCK_LOADING[key] = true;
   renderStockList();
+  const terminar = ()=>{ STOCK_LOADING[key] = false; renderStockList(); };
   ensureGoogleAuth(async ()=>{
     try{
       const source = STOCK_SOURCES.find(s=>s.key===key);
       const term = STOCK_TERMS[key];
       const file = await driveFindFileByName(term, source.isGeneral);
       if(!file){
-        STOCK_CACHE[key] = {error:`No encontré ningún archivo que contenga "${term}" en tu Drive. Revisá el nombre en "Configurar archivos".`};
-        renderStockList();
+        const msg = `No encontré ningún archivo que contenga "${term}" en tu Drive. Revisá el nombre en "Configurar archivos".`;
+        if(STOCK_CACHE[key] && STOCK_CACHE[key].items) STOCK_CACHE[key].lastError = msg;
+        else STOCK_CACHE[key] = {error: msg};
+        terminar();
         return;
       }
       const wb = await driveDownloadWorkbook(file);
       const wsStock = findSheetCaseInsensitive(wb, 'stock');
       if(!wsStock){
-        STOCK_CACHE[key] = {error:`El archivo "${file.name}" no tiene una hoja llamada "stock".`};
-        renderStockList();
+        const msg = `El archivo "${file.name}" no tiene una hoja llamada "stock".`;
+        if(STOCK_CACHE[key] && STOCK_CACHE[key].items) STOCK_CACHE[key].lastError = msg;
+        else STOCK_CACHE[key] = {error: msg};
+        terminar();
         return;
       }
       const items = parseStockSheet(wsStock);
@@ -1204,13 +1231,16 @@ function fetchStockSource(key, force){
         items.forEach(it => { it.ubicacion = ubicaciones[it.codigo] || ''; });
       }
       STOCK_CACHE[key] = {items, fetchedAt: Date.now(), fileName: file.name};
-      renderStockList();
+      saveStockCache();
+      terminar();
     }catch(e){
       console.error(e);
-      STOCK_CACHE[key] = {error:'No se pudo leer el archivo desde Drive. Probá "Actualizar" de nuevo.'};
-      renderStockList();
+      const msg = 'No se pudo leer el archivo desde Drive. Probá "Actualizar" de nuevo.';
+      if(STOCK_CACHE[key] && STOCK_CACHE[key].items) STOCK_CACHE[key].lastError = msg;
+      else STOCK_CACHE[key] = {error: msg};
+      terminar();
     }
-  });
+  }, terminar);
 }
 
 function openStockConfigSheet(){
