@@ -841,11 +841,26 @@ function renderOverdueBanner(){
 
 // ================= Render maestro =================
 function renderAll(){
-  renderStateChips();
-  renderOverdueBanner();
-  document.getElementById('filterDot').style.display = isFiltersActive() ? 'block' : 'none';
-  document.getElementById('pageSub').textContent =
-    `${TASKS.filter(t=>!estaResuelta(t)).length} sin resolver de ${TASKS.length} en total`;
+  const isStock = state.view === 'stock';
+  document.getElementById('pageTitle').textContent = isStock ? 'Repuestos' : 'Mantenimientos';
+  document.getElementById('btnBackup').style.display = isStock ? 'none' : 'flex';
+  document.getElementById('btnSettings').style.display = isStock ? 'none' : 'flex';
+  document.getElementById('btnFilter').style.display = isStock ? 'none' : 'flex';
+
+  if(isStock){
+    document.getElementById('pageSub').style.display = 'none';
+    document.getElementById('overdueBanner').style.display = 'none';
+  } else {
+    document.getElementById('pageSub').style.display = 'block';
+    renderStateChips();
+    renderOverdueBanner();
+    document.getElementById('filterDot').style.display = isFiltersActive() ? 'block' : 'none';
+    const sucursalesPendientes = TASKS.filter(t=>!estaResuelta(t)).length;
+    const maquinasPendientes = TASKS.reduce((s,t)=> s + distTotal(t,'Pendiente'), 0);
+    document.getElementById('pageSub').textContent =
+      `${sucursalesPendientes} sucursales · ${maquinasPendientes} máquinas sin resolver de ${TASKS.length} en total`;
+  }
+
   if(state.view==='meses'){ renderMonthStrip(); renderMeses(); }
   else if(state.view==='todos'){ renderTodos(); }
   else if(state.view==='plan'){ renderPlan(); }
