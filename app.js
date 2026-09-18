@@ -1145,7 +1145,7 @@ function renderStockFilterChips(){
   });
 }
 
-function stockItemHtml(item, isGeneral){
+function stockItemHtml(item){
   return `
   <div class="task-card stock-card">
     <div class="row1">
@@ -1155,10 +1155,10 @@ function stockItemHtml(item, isGeneral){
       </div>
       <div class="badge" style="background:${Number(item.saldo)===0?'var(--red-dim)':'var(--panel-2)'};color:${Number(item.saldo)===0?'var(--red)':'var(--text)'};">${escapeHtml(String(item.saldo))} u.</div>
     </div>
-    ${isGeneral ? `<div class="meta-row">
+    <div class="meta-row">
       <div class="meta-tag dist">${item.ubicacion ? escapeHtml(item.ubicacion) : 'sin ubicación'}</div>
       ${item.modelos ? `<div class="meta-tag">Modelos: ${escapeHtml(item.modelos)}</div>` : ''}
-    </div>` : ''}
+    </div>
   </div>`;
 }
 
@@ -1213,7 +1213,7 @@ function renderStockList(){
   // Sin ningún filtro activo evitamos pintar miles de filas de una: mostramos los primeros 150.
   const algunFiltroActivo = !!q || state.stockOnlyZero;
   const toShow = algunFiltroActivo ? filtered : filtered.slice(0,150);
-  container.innerHTML = toShow.map(it=>stockItemHtml(it, source.isGeneral)).join('') +
+  container.innerHTML = toShow.map(it=>stockItemHtml(it)).join('') +
     (!algunFiltroActivo && filtered.length>toShow.length ? `<div class="dist-sum-hint" style="padding:10px 18px;">Mostrando ${toShow.length} de ${filtered.length}. Buscá por código o descripción, o filtrá por "Solo en cero".</div>` : '');
 }
 
@@ -1247,8 +1247,9 @@ function fetchStockSource(key, force){
         return;
       }
       const items = parseStockSheet(wsStock);
-      if(source.isGeneral){
-        const wsGav = findSheetCaseInsensitive(wb, 'Gavetas - nuevo');
+      // La hoja "Gavetas - nuevo" (ubicación + modelos) está en los 5 archivos, no solo en General.
+      const wsGav = findSheetCaseInsensitive(wb, 'Gavetas - nuevo');
+      if(wsGav){
         const ubicaciones = parseGavetasSheet(wsGav);
         items.forEach(it => {
           const info = ubicaciones[it.codigo];
