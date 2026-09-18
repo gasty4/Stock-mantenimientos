@@ -863,7 +863,7 @@ function renderAll(){
   if(state.view==='meses'){ renderMonthStrip(); renderMeses(); }
   else if(state.view==='todos'){ renderTodos(); }
   else if(state.view==='plan'){ renderPlan(); }
-  else if(state.view==='stock'){ renderStockChips(); renderStockList(); }
+  else if(state.view==='stock'){ renderStockChips(); renderStockFilterChips(); renderStockList(); }
 }
 
 // ================= Copia de seguridad (Excel + Google Drive) =================
@@ -1052,6 +1052,7 @@ let STOCK_CACHE = loadStockCache(); // key -> {items, fetchedAt, fileName, lastE
 const STOCK_LOADING = {}; // key -> true mientras se está pidiendo a Drive (nunca se persiste)
 state.stockSource = 'General';
 state.stockSearch = '';
+state.stockOnlyZero = false;
 
 async function driveFindFileByName(term, startsWith){
   const safeTerm = term.replace(/'/g, "\\'");
@@ -1112,8 +1113,9 @@ function parseGavetasSheet(ws){
     const atributo = String(r[3]||'').trim(); // D
     const estante = String(r[4]||'').trim();  // E
     const ubicacion = String(r[5]||'').trim();// F
+    const modelos = String(r[7]||'').trim();  // H
     const partes = [atributo, estante, ubicacion].filter(p=>p!=='');
-    map[codigo] = partes.join('-');
+    map[codigo] = {ubicacion: partes.join('-'), modelos};
   });
   return map;
 }
@@ -1132,6 +1134,17 @@ function renderStockChips(){
   });
 }
 
+function renderStockFilterChips(){
+  const row = document.getElementById('stockFilterChips');
+  if(!row) return;
+  row.innerHTML = `<div class="chip ${state.stockOnlyZero?'active':''}" id="chipStockZero">Solo en cero</div>`;
+  document.getElementById('chipStockZero').addEventListener('click', ()=>{
+    state.stockOnlyZero = !state.stockOnlyZero;
+    renderStockFilterChips();
+    renderStockList();
+  });
+}
+
 function stockItemHtml(item, isGeneral){
   return `
   <div class="task-card stock-card">
@@ -1140,9 +1153,12 @@ function stockItemHtml(item, isGeneral){
         <div class="cliente">${escapeHtml(item.codigo)}</div>
         <div class="localidad-line" style="margin-top:2px;">${escapeHtml(item.descripcion)}</div>
       </div>
-      <div class="badge" style="background:var(--panel-2);color:var(--text);">${escapeHtml(String(item.saldo))} u.</div>
+      <div class="badge" style="background:${Number(item.saldo)===0?'var(--red-dim)':'var(--panel-2)'};color:${Number(item.saldo)===0?'var(--red)':'var(--text)'};">${escapeHtml(String(item.saldo))} u.</div>
     </div>
-    ${isGeneral ? `<div class="meta-row"><div class="meta-tag dist">${item.ubicacion ? escapeHtml(item.ubicacion) : 'sin ubicación'}</div></div>` : ''}
+    ${isGeneral ? `<div class="meta-row">
+      <div class="meta-tag dist">${item.ubicacion ? escapeHtml(item.ubicacion) : 'sin ubicación'}</div>
+      ${item.modelos ? `<div class="meta-tag">Modelos: ${escapeHtml(item.modelos)}</div>` : ''}
+    </div>` : ''}
   </div>`;
 }
 
@@ -1181,18 +1197,24 @@ function renderStockList(){
   else statusEl.textContent = fecha;
 
   const q = state.stockSearch.trim().toLowerCase();
-  const filtered = q ? cached.items.filter(it =>
-    it.codigo.toLowerCase().includes(q) || it.descripcion.toLowerCase().includes(q)
-  ) : cached.items;
+  const filtered = cached.items.filter(it =>
+    (!q || it.codigo.toLowerCase().includes(q) || it.descripcion.toLowerCase().includes(q)) &&
+    (!state.stockOnlyZero || Number(it.saldo)===0)
+  );
 
   if(filtered.length===0){
-    container.innerHTML = emptyStateHtml(q ? 'No hay resultados para esa búsqueda.' : 'Ese archivo no tiene ítems cargados.');
+    container.innerHTML = emptyStateHtml(
+      state.stockOnlyZero && q ? 'No hay ítems en cero para esa búsqueda.' :
+      state.stockOnlyZero ? 'No hay ítems en cero en este archivo.' :
+      q ? 'No hay resultados para esa búsqueda.' : 'Ese archivo no tiene ítems cargados.'
+    );
     return;
   }
-  // Sin búsqueda, evitamos pintar miles de filas de una: mostramos los primeros 150.
-  const toShow = q ? filtered : filtered.slice(0,150);
+  // Sin ningún filtro activo evitamos pintar miles de filas de una: mostramos los primeros 150.
+  const algunFiltroActivo = !!q || state.stockOnlyZero;
+  const toShow = algunFiltroActivo ? filtered : filtered.slice(0,150);
   container.innerHTML = toShow.map(it=>stockItemHtml(it, source.isGeneral)).join('') +
-    (!q && filtered.length>toShow.length ? `<div class="dist-sum-hint" style="padding:10px 18px;">Mostrando ${toShow.length} de ${filtered.length}. Buscá por código o descripción para filtrar.</div>` : '');
+    (!algunFiltroActivo && filtered.length>toShow.length ? `<div class="dist-sum-hint" style="padding:10px 18px;">Mostrando ${toShow.length} de ${filtered.length}. Buscá por código o descripción, o filtrá por "Solo en cero".</div>` : '');
 }
 
 // Solo pide iniciar sesión con Google cuando no hay datos guardados todavía para esa
@@ -1228,7 +1250,11 @@ function fetchStockSource(key, force){
       if(source.isGeneral){
         const wsGav = findSheetCaseInsensitive(wb, 'Gavetas - nuevo');
         const ubicaciones = parseGavetasSheet(wsGav);
-        items.forEach(it => { it.ubicacion = ubicaciones[it.codigo] || ''; });
+        items.forEach(it => {
+          const info = ubicaciones[it.codigo];
+          it.ubicacion = info ? info.ubicacion : '';
+          it.modelos = info ? info.modelos : '';
+        });
       }
       STOCK_CACHE[key] = {items, fetchedAt: Date.now(), fileName: file.name};
       saveStockCache();
