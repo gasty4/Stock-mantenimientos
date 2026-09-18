@@ -815,8 +815,10 @@ function switchView(view){
   document.querySelectorAll('.view').forEach(v=>v.classList.remove('active'));
   document.getElementById('view-'+view).classList.add('active');
   document.querySelectorAll('.tab-btn').forEach(b=>b.classList.toggle('active', b.dataset.view===view));
-  document.getElementById('searchRow').style.display = (view==='plan') ? 'none' : 'flex';
-  document.getElementById('stateChipRow').style.display = (view==='plan') ? 'none' : 'flex';
+  document.getElementById('searchRow').style.display = (view==='plan' || view==='stock') ? 'none' : 'flex';
+  document.getElementById('stateChipRow').style.display = (view==='plan' || view==='stock') ? 'none' : 'flex';
+  document.getElementById('fabAdd').style.display = (view==='stock') ? 'none' : 'flex';
+  if(view==='stock' && !STOCK_CACHE[state.stockSource]) fetchStockSource(state.stockSource, false);
   renderAll();
 }
 
@@ -847,6 +849,7 @@ function renderAll(){
   if(state.view==='meses'){ renderMonthStrip(); renderMeses(); }
   else if(state.view==='todos'){ renderTodos(); }
   else if(state.view==='plan'){ renderPlan(); }
+  else if(state.view==='stock'){ renderStockChips(); renderStockList(); }
 }
 
 // ================= Copia de seguridad (Excel + Google Drive) =================
@@ -908,7 +911,9 @@ function ensureGoogleAuth(onReady){
   if(!gTokenClient){
     gTokenClient = google.accounts.oauth2.initTokenClient({
       client_id: clientId,
-      scope: 'https://www.googleapis.com/auth/drive.file',
+      // drive.file: para el backup propio. drive.readonly: para poder leer los 5 excel
+      // de stock que ya existen en tu Drive (no fueron creados por esta app).
+      scope: 'https://www.googleapis.com/auth/drive.file https://www.googleapis.com/auth/drive.readonly',
       callback: (resp)=>{
         if(resp.error){
           alert('No se pudo iniciar sesión con Google: '+resp.error);
@@ -997,6 +1002,221 @@ function restoreFromDrive(){
       alert('No se pudo restaurar desde Drive. Probá de nuevo.');
     }
   });
+}
+
+// ================= Stock (lectura de 5 excel en Google Drive) =================
+const LS_STOCK_TERMS = 'mant_stock_terms_v1';
+const STOCK_SOURCES = [
+  {key:'General', label:'General', isGeneral:true},
+  {key:'Tuc01', label:'Tuc 01'},
+  {key:'Tuc02', label:'Tuc 02'},
+  {key:'Tuc03', label:'Tuc 03'},
+  {key:'Tuc04', label:'Tuc 04'},
+];
+const DEFAULT_STOCK_TERMS = {General:'stock nodo', Tuc01:'Tuc 01', Tuc02:'Tuc 02', Tuc03:'Tuc 03', Tuc04:'Tuc 04'};
+function loadStockTerms(){
+  try{ return Object.assign({}, DEFAULT_STOCK_TERMS, JSON.parse(localStorage.getItem(LS_STOCK_TERMS)||'{}')); }
+  catch(e){ return Object.assign({}, DEFAULT_STOCK_TERMS); }
+}
+function saveStockTerms(t){ localStorage.setItem(LS_STOCK_TERMS, JSON.stringify(t)); }
+let STOCK_TERMS = loadStockTerms();
+const STOCK_CACHE = {}; // key -> {items:[{codigo,descripcion,saldo,ubicacion}], fetchedAt}
+state.stockSource = 'General';
+state.stockSearch = '';
+
+async function driveFindFileByName(term, startsWith){
+  const safeTerm = term.replace(/'/g, "\\'");
+  const q = startsWith
+    ? `name contains '${safeTerm}' and trashed=false`
+    : `name contains '${safeTerm}' and trashed=false`;
+  const res = await fetch(`https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(q)}&fields=files(id,name,mimeType,modifiedTime)&orderBy=modifiedTime desc&pageSize=10`, {
+    headers: {Authorization:`Bearer ${gAccessToken}`}
+  });
+  if(!res.ok) throw new Error('HTTP '+res.status);
+  const data = await res.json();
+  const files = data.files || [];
+  if(startsWith){
+    const lower = term.toLowerCase();
+    const exact = files.find(f=>f.name.toLowerCase().startsWith(lower));
+    if(exact) return exact;
+  }
+  return files[0] || null;
+}
+
+async function driveDownloadWorkbook(file){
+  const isGoogleSheet = file.mimeType === 'application/vnd.google-apps.spreadsheet';
+  const url = isGoogleSheet
+    ? `https://www.googleapis.com/drive/v3/files/${file.id}/export?mimeType=${encodeURIComponent('application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')}`
+    : `https://www.googleapis.com/drive/v3/files/${file.id}?alt=media`;
+  const res = await fetch(url, {headers:{Authorization:`Bearer ${gAccessToken}`}});
+  if(!res.ok) throw new Error('HTTP '+res.status);
+  const buf = await res.arrayBuffer();
+  return XLSX.read(buf, {type:'array'});
+}
+
+function findSheetCaseInsensitive(wb, name){
+  const key = wb.SheetNames.find(n => n.trim().toLowerCase() === name.trim().toLowerCase());
+  return key ? wb.Sheets[key] : null;
+}
+
+function parseStockSheet(ws){
+  if(!ws) return [];
+  const aoa = XLSX.utils.sheet_to_json(ws, {header:1, defval:'', raw:true});
+  const dataRows = aoa.slice(11); // fila 11 (índice 10) es el título; los datos arrancan en la fila 12
+  return dataRows
+    .filter(r => r[0] !== '' && r[0] !== undefined)
+    .map(r => ({
+      codigo: String(r[0]).trim(),
+      descripcion: String(r[1]||'').trim(),
+      saldo: r[4]===''||r[4]===undefined ? 0 : r[4]
+    }));
+}
+
+function parseGavetasSheet(ws){
+  if(!ws) return {};
+  const aoa = XLSX.utils.sheet_to_json(ws, {header:1, defval:'', raw:true});
+  const dataRows = aoa.slice(1); // fila 1 es el título
+  const map = {};
+  dataRows.forEach(r=>{
+    const codigo = String(r[1]||'').trim(); // columna B
+    if(!codigo) return;
+    const atributo = String(r[3]||'').trim(); // D
+    const estante = String(r[4]||'').trim();  // E
+    const ubicacion = String(r[5]||'').trim();// F
+    const partes = [atributo, estante, ubicacion].filter(p=>p!=='');
+    map[codigo] = partes.join('-');
+  });
+  return map;
+}
+
+function renderStockChips(){
+  const row = document.getElementById('stockSourceChips');
+  row.innerHTML = STOCK_SOURCES.map(s=>`
+    <div class="chip ${state.stockSource===s.key?'active':''}" data-source="${s.key}">${s.label}</div>
+  `).join('');
+  row.querySelectorAll('.chip').forEach(el=>{
+    el.addEventListener('click', ()=>{
+      state.stockSource = el.dataset.source;
+      renderStockChips();
+      fetchStockSource(state.stockSource, false);
+    });
+  });
+}
+
+function stockItemHtml(item, isGeneral){
+  return `
+  <div class="task-card stock-card">
+    <div class="row1">
+      <div style="flex:1 1 180px;min-width:0;">
+        <div class="cliente">${escapeHtml(item.codigo)}</div>
+        <div class="localidad-line" style="margin-top:2px;">${escapeHtml(item.descripcion)}</div>
+      </div>
+      <div class="badge" style="background:var(--panel-2);color:var(--text);">${escapeHtml(String(item.saldo))} u.</div>
+    </div>
+    ${isGeneral ? `<div class="meta-row"><div class="meta-tag dist">${item.ubicacion ? escapeHtml(item.ubicacion) : 'sin ubicación'}</div></div>` : ''}
+  </div>`;
+}
+
+function renderStockList(){
+  const source = STOCK_SOURCES.find(s=>s.key===state.stockSource);
+  const cached = STOCK_CACHE[state.stockSource];
+  const container = document.getElementById('stockList');
+  const statusEl = document.getElementById('stockStatus');
+
+  if(!cached){
+    statusEl.textContent = '';
+    container.innerHTML = emptyStateHtml('Tocá para cargar el stock de "'+source.label+'" desde Google Drive.') +
+      `<div style="padding:0 18px;"><button class="primary-btn" id="stockLoadNow">Cargar stock</button></div>`;
+    const btn = document.getElementById('stockLoadNow');
+    if(btn) btn.addEventListener('click', ()=> fetchStockSource(state.stockSource, false));
+    return;
+  }
+  if(cached.loading){
+    statusEl.textContent = 'Cargando desde Google Drive…';
+    container.innerHTML = emptyStateHtml('Cargando…');
+    return;
+  }
+  if(cached.error){
+    statusEl.textContent = '';
+    container.innerHTML = emptyStateHtml(cached.error) +
+      `<div style="padding:0 18px;"><button class="primary-btn" id="stockRetry">Reintentar</button></div>`;
+    const btn = document.getElementById('stockRetry');
+    if(btn) btn.addEventListener('click', ()=> fetchStockSource(state.stockSource, true));
+    return;
+  }
+
+  statusEl.textContent = `Actualizado: ${new Date(cached.fetchedAt).toLocaleString('es-AR')} · ${cached.items.length} ítems`;
+  const q = state.stockSearch.trim().toLowerCase();
+  const filtered = q ? cached.items.filter(it =>
+    it.codigo.toLowerCase().includes(q) || it.descripcion.toLowerCase().includes(q)
+  ) : cached.items;
+
+  if(filtered.length===0){
+    container.innerHTML = emptyStateHtml(q ? 'No hay resultados para esa búsqueda.' : 'Ese archivo no tiene ítems cargados.');
+    return;
+  }
+  // Sin búsqueda, evitamos pintar miles de filas de una: mostramos los primeros 150.
+  const toShow = q ? filtered : filtered.slice(0,150);
+  container.innerHTML = toShow.map(it=>stockItemHtml(it, source.isGeneral)).join('') +
+    (!q && filtered.length>toShow.length ? `<div class="dist-sum-hint" style="padding:10px 18px;">Mostrando ${toShow.length} de ${filtered.length}. Buscá por código o descripción para filtrar.</div>` : '');
+}
+
+function fetchStockSource(key, force){
+  if(!force && STOCK_CACHE[key] && !STOCK_CACHE[key].error){ renderStockList(); return; }
+  STOCK_CACHE[key] = {loading:true};
+  renderStockList();
+  ensureGoogleAuth(async ()=>{
+    try{
+      const source = STOCK_SOURCES.find(s=>s.key===key);
+      const term = STOCK_TERMS[key];
+      const file = await driveFindFileByName(term, source.isGeneral);
+      if(!file){
+        STOCK_CACHE[key] = {error:`No encontré ningún archivo que contenga "${term}" en tu Drive. Revisá el nombre en "Configurar archivos".`};
+        renderStockList();
+        return;
+      }
+      const wb = await driveDownloadWorkbook(file);
+      const wsStock = findSheetCaseInsensitive(wb, 'stock');
+      if(!wsStock){
+        STOCK_CACHE[key] = {error:`El archivo "${file.name}" no tiene una hoja llamada "stock".`};
+        renderStockList();
+        return;
+      }
+      const items = parseStockSheet(wsStock);
+      if(source.isGeneral){
+        const wsGav = findSheetCaseInsensitive(wb, 'Gavetas - nuevo');
+        const ubicaciones = parseGavetasSheet(wsGav);
+        items.forEach(it => { it.ubicacion = ubicaciones[it.codigo] || ''; });
+      }
+      STOCK_CACHE[key] = {items, fetchedAt: Date.now(), fileName: file.name};
+      renderStockList();
+    }catch(e){
+      console.error(e);
+      STOCK_CACHE[key] = {error:'No se pudo leer el archivo desde Drive. Probá "Actualizar" de nuevo.'};
+      renderStockList();
+    }
+  });
+}
+
+function openStockConfigSheet(){
+  document.getElementById('stockConfigBody').innerHTML = `
+    <div class="dist-sum-hint">Texto que se busca en el nombre del archivo dentro de tu Google Drive, para cada fuente.</div>
+    ${STOCK_SOURCES.map(s=>`
+      <div class="field-label">${s.label}</div>
+      <input type="text" id="stockTerm_${s.key}" value="${escapeHtml(STOCK_TERMS[s.key]||'')}">
+    `).join('')}
+    <button class="primary-btn" id="stockTermsSave">Guardar</button>
+  `;
+  document.getElementById('stockTermsSave').addEventListener('click', ()=>{
+    STOCK_SOURCES.forEach(s=>{
+      STOCK_TERMS[s.key] = document.getElementById('stockTerm_'+s.key).value.trim() || DEFAULT_STOCK_TERMS[s.key];
+    });
+    saveStockTerms(STOCK_TERMS);
+    Object.keys(STOCK_CACHE).forEach(k=> delete STOCK_CACHE[k]); // fuerza recarga con los nuevos nombres
+    closeSheet('stockConfigSheet');
+    renderStockList();
+  });
+  openSheet('stockConfigSheet');
 }
 
 // ================= Exportar a Excel =================
@@ -1117,6 +1337,10 @@ document.getElementById('overlay').addEventListener('click', closeAllSheets);
 document.getElementById('btnSettings').addEventListener('click', openDistSheet);
 document.getElementById('btnBackup').addEventListener('click', openBackupSheet);
 document.getElementById('backupClose').addEventListener('click', ()=>closeSheet('backupSheet'));
+document.getElementById('stockSearchInput').addEventListener('input', (e)=>{ state.stockSearch = e.target.value; renderStockList(); });
+document.getElementById('btnStockRefresh').addEventListener('click', ()=> fetchStockSource(state.stockSource, true));
+document.getElementById('btnStockConfig').addEventListener('click', openStockConfigSheet);
+document.getElementById('stockConfigClose').addEventListener('click', ()=>closeSheet('stockConfigSheet'));
 document.getElementById('importFileInput').addEventListener('change', (e)=>{
   const file = e.target.files[0];
   e.target.value = '';
