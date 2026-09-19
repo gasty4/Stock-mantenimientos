@@ -1052,7 +1052,8 @@ let STOCK_CACHE = loadStockCache(); // key -> {items, fetchedAt, fileName, lastE
 const STOCK_LOADING = {}; // key -> true mientras se está pidiendo a Drive (nunca se persiste)
 state.stockSource = 'General';
 state.stockSearch = '';
-state.stockOnlyZero = false;
+state.stockCeroFilter = 'todos'; // 'todos' | 'cero' | 'conStock'
+state.stockModelFilter = ''; // '' = todos los modelos
 
 async function driveFindFileByName(term, startsWith){
   const safeTerm = term.replace(/'/g, "\\'");
@@ -1129,20 +1130,54 @@ function renderStockChips(){
     el.addEventListener('click', ()=>{
       state.stockSource = el.dataset.source;
       renderStockChips();
+      renderStockFilterChips();
       renderStockList(); // solo muestra lo que ya haya en caché; no dispara login solo/a
     });
   });
 }
 
+function splitModelos(str){
+  return String(str||'').split(/[\/,;]+/).map(s=>s.trim()).filter(Boolean);
+}
+function getDistinctModelos(items){
+  const set = new Set();
+  items.forEach(it => splitModelos(it.modelos).forEach(m=>set.add(m)));
+  return [...set].sort((a,b)=>a.localeCompare(b));
+}
+
 function renderStockFilterChips(){
   const row = document.getElementById('stockFilterChips');
   if(!row) return;
-  row.innerHTML = `<div class="chip ${state.stockOnlyZero?'active':''}" id="chipStockZero">Solo en cero</div>`;
-  document.getElementById('chipStockZero').addEventListener('click', ()=>{
-    state.stockOnlyZero = !state.stockOnlyZero;
-    renderStockFilterChips();
-    renderStockList();
+  const opciones = [
+    {key:'todos', label:'Todos'},
+    {key:'cero', label:'Solo en cero'},
+    {key:'conStock', label:'Con stock'},
+  ];
+  row.innerHTML = opciones.map(o=>
+    `<div class="chip ${state.stockCeroFilter===o.key?'active':''}" data-cero="${o.key}">${o.label}</div>`
+  ).join('');
+  row.querySelectorAll('.chip').forEach(el=>{
+    el.addEventListener('click', ()=>{
+      state.stockCeroFilter = el.dataset.cero;
+      renderStockFilterChips();
+      renderStockList();
+    });
   });
+
+  // Select de modelo: se arma con los modelos que aparecen en los datos ya cargados de esta fuente.
+  const modelSelect = document.getElementById('stockModelFilter');
+  if(modelSelect){
+    const cached = STOCK_CACHE[state.stockSource];
+    const modelos = cached && cached.items ? getDistinctModelos(cached.items) : [];
+    if(modelos.length === 0){
+      modelSelect.style.display = 'none';
+    } else {
+      modelSelect.style.display = '';
+      if(!modelos.includes(state.stockModelFilter)) state.stockModelFilter = '';
+      modelSelect.innerHTML = `<option value="">Todos los modelos</option>` +
+        modelos.map(m=>`<option value="${escapeHtml(m)}" ${state.stockModelFilter===m?'selected':''}>${escapeHtml(m)}</option>`).join('');
+    }
+  }
 }
 
 function stockItemHtml(item){
@@ -1157,7 +1192,7 @@ function stockItemHtml(item){
     </div>
     <div class="meta-row">
       <div class="meta-tag dist">${item.ubicacion ? escapeHtml(item.ubicacion) : 'sin ubicación'}</div>
-      ${item.modelos ? `<div class="meta-tag">Modelos: ${escapeHtml(item.modelos)}</div>` : ''}
+      ${item.modelos ? `<div class="meta-tag">${escapeHtml(item.modelos)}</div>` : ''}
     </div>
   </div>`;
 }
@@ -1199,22 +1234,21 @@ function renderStockList(){
   const q = state.stockSearch.trim().toLowerCase();
   const filtered = cached.items.filter(it =>
     (!q || it.codigo.toLowerCase().includes(q) || it.descripcion.toLowerCase().includes(q)) &&
-    (!state.stockOnlyZero || Number(it.saldo)===0)
+    (state.stockCeroFilter==='todos' || (state.stockCeroFilter==='cero') === (Number(it.saldo)===0)) &&
+    (!state.stockModelFilter || splitModelos(it.modelos).some(m=>m.toLowerCase()===state.stockModelFilter.toLowerCase()))
   );
 
   if(filtered.length===0){
     container.innerHTML = emptyStateHtml(
-      state.stockOnlyZero && q ? 'No hay ítems en cero para esa búsqueda.' :
-      state.stockOnlyZero ? 'No hay ítems en cero en este archivo.' :
-      q ? 'No hay resultados para esa búsqueda.' : 'Ese archivo no tiene ítems cargados.'
+      q ? 'No hay resultados para esa búsqueda con esos filtros.' : 'No hay ítems que cumplan ese filtro en este archivo.'
     );
     return;
   }
   // Sin ningún filtro activo evitamos pintar miles de filas de una: mostramos los primeros 150.
-  const algunFiltroActivo = !!q || state.stockOnlyZero;
+  const algunFiltroActivo = !!q || state.stockCeroFilter!=='todos' || !!state.stockModelFilter;
   const toShow = algunFiltroActivo ? filtered : filtered.slice(0,150);
   container.innerHTML = toShow.map(it=>stockItemHtml(it)).join('') +
-    (!algunFiltroActivo && filtered.length>toShow.length ? `<div class="dist-sum-hint" style="padding:10px 18px;">Mostrando ${toShow.length} de ${filtered.length}. Buscá por código o descripción, o filtrá por "Solo en cero".</div>` : '');
+    (!algunFiltroActivo && filtered.length>toShow.length ? `<div class="dist-sum-hint" style="padding:10px 18px;">Mostrando ${toShow.length} de ${filtered.length}. Buscá por código o descripción, o usá los filtros.</div>` : '');
 }
 
 // Solo pide iniciar sesión con Google cuando no hay datos guardados todavía para esa
@@ -1224,7 +1258,7 @@ function fetchStockSource(key, force){
   if(STOCK_LOADING[key]) return; // ya hay una carga en curso para esta fuente
   STOCK_LOADING[key] = true;
   renderStockList();
-  const terminar = ()=>{ STOCK_LOADING[key] = false; renderStockList(); };
+  const terminar = ()=>{ STOCK_LOADING[key] = false; renderStockFilterChips(); renderStockList(); };
   ensureGoogleAuth(async ()=>{
     try{
       const source = STOCK_SOURCES.find(s=>s.key===key);
@@ -1410,6 +1444,7 @@ document.getElementById('btnSettings').addEventListener('click', openDistSheet);
 document.getElementById('btnBackup').addEventListener('click', openBackupSheet);
 document.getElementById('backupClose').addEventListener('click', ()=>closeSheet('backupSheet'));
 document.getElementById('stockSearchInput').addEventListener('input', (e)=>{ state.stockSearch = e.target.value; renderStockList(); });
+document.getElementById('stockModelFilter').addEventListener('change', (e)=>{ state.stockModelFilter = e.target.value; renderStockList(); });
 document.getElementById('btnStockRefresh').addEventListener('click', ()=> fetchStockSource(state.stockSource, true));
 document.getElementById('btnStockConfig').addEventListener('click', openStockConfigSheet);
 document.getElementById('stockConfigClose').addEventListener('click', ()=>closeSheet('stockConfigSheet'));
