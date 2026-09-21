@@ -930,24 +930,29 @@ function ensureGoogleAuth(onReady, onFail){
       // drive.file: para el backup propio. drive.readonly: para poder leer los 5 excel
       // de stock que ya existen en tu Drive (no fueron creados por esta app).
       scope: 'https://www.googleapis.com/auth/drive.file https://www.googleapis.com/auth/drive.readonly',
-      callback: (resp)=>{
-        if(resp.error){
+      callback: ()=>{} // se reemplaza en cada llamada, ver pedirToken()
+    });
+  }
+  // Primero probamos en silencio (sin mostrar ninguna pantalla de Google): si ya diste el
+  // permiso antes y seguís logueado en este navegador, Google devuelve el token solo.
+  // Solo si eso falla mostramos la pantalla de "Acceder con Google" de nuevo.
+  const pedirToken = (silencioso)=>{
+    gTokenClient.callback = (resp)=>{
+      if(resp.error){
+        if(silencioso){
+          pedirToken(false); // reintenta mostrando la pantalla de Google
+        } else {
           alert('No se pudo iniciar sesión con Google: '+resp.error);
           if(onFail) onFail();
-          return;
         }
-        gAccessToken = resp.access_token;
-        onReady();
+        return;
       }
-    });
-  } else {
-    gTokenClient.callback = (resp)=>{
-      if(resp.error){ alert('No se pudo iniciar sesión con Google: '+resp.error); if(onFail) onFail(); return; }
       gAccessToken = resp.access_token;
       onReady();
     };
-  }
-  gTokenClient.requestAccessToken({prompt: gAccessToken ? '' : 'consent'});
+    gTokenClient.requestAccessToken({prompt: silencioso ? '' : 'consent'});
+  };
+  pedirToken(true);
 }
 
 async function findDriveBackupFile(){
