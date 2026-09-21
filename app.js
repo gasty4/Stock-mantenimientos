@@ -1282,55 +1282,69 @@ function renderStockList(){
 
 // Solo pide iniciar sesión con Google cuando no hay datos guardados todavía para esa
 // fuente, o cuando el usuario tocó explícitamente "Actualizar" (force=true).
-function fetchStockSource(key, force){
-  if(!force && STOCK_CACHE[key] && STOCK_CACHE[key].items){ renderStockList(); return; }
-  if(STOCK_LOADING[key]) return; // ya hay una carga en curso para esta fuente
+// Trae y parsea UNA fuente puntual. Asume que ya hay un gAccessToken válido (no pide login).
+async function fetchOneSourceInner(key){
   STOCK_LOADING[key] = true;
-  renderStockList();
-  const terminar = ()=>{ STOCK_LOADING[key] = false; renderStockFilterChips(); renderStockList(); };
-  ensureGoogleAuth(async ()=>{
-    try{
-      const source = STOCK_SOURCES.find(s=>s.key===key);
-      const term = STOCK_TERMS[key];
-      const file = await driveFindFileByName(term, source.isGeneral);
-      if(!file){
-        const msg = `No encontré ningún archivo que contenga "${term}" en tu Drive. Revisá el nombre en "Configurar archivos".`;
-        if(STOCK_CACHE[key] && STOCK_CACHE[key].items) STOCK_CACHE[key].lastError = msg;
-        else STOCK_CACHE[key] = {error: msg};
-        terminar();
-        return;
-      }
-      const wb = await driveDownloadWorkbook(file);
-      const wsStock = findSheetCaseInsensitive(wb, 'stock');
-      if(!wsStock){
-        const msg = `El archivo "${file.name}" no tiene una hoja llamada "stock".`;
-        if(STOCK_CACHE[key] && STOCK_CACHE[key].items) STOCK_CACHE[key].lastError = msg;
-        else STOCK_CACHE[key] = {error: msg};
-        terminar();
-        return;
-      }
-      const items = parseStockSheet(wsStock);
-      // La hoja "Gavetas - nuevo" (ubicación + modelos) está en los 5 archivos, no solo en General.
-      const wsGav = findSheetCaseInsensitive(wb, 'Gavetas - nuevo');
-      if(wsGav){
-        const ubicaciones = parseGavetasSheet(wsGav);
-        items.forEach(it => {
-          const info = ubicaciones[it.codigo];
-          it.ubicacion = info ? info.ubicacion : '';
-          it.modelos = info ? info.modelos : '';
-        });
-      }
-      STOCK_CACHE[key] = {items, fetchedAt: Date.now(), fileName: file.name};
-      saveStockCache();
-      terminar();
-    }catch(e){
-      console.error(e);
-      const msg = 'No se pudo leer el archivo desde Drive. Probá "Actualizar" de nuevo.';
+  if(state.stockSource===key) renderStockList();
+  try{
+    const source = STOCK_SOURCES.find(s=>s.key===key);
+    const term = STOCK_TERMS[key];
+    const file = await driveFindFileByName(term, source.isGeneral);
+    if(!file){
+      const msg = `No encontré ningún archivo que contenga "${term}" en tu Drive. Revisá el nombre en "Configurar archivos".`;
       if(STOCK_CACHE[key] && STOCK_CACHE[key].items) STOCK_CACHE[key].lastError = msg;
       else STOCK_CACHE[key] = {error: msg};
-      terminar();
+      return;
     }
-  }, terminar);
+    const wb = await driveDownloadWorkbook(file);
+    const wsStock = findSheetCaseInsensitive(wb, 'stock');
+    if(!wsStock){
+      const msg = `El archivo "${file.name}" no tiene una hoja llamada "stock".`;
+      if(STOCK_CACHE[key] && STOCK_CACHE[key].items) STOCK_CACHE[key].lastError = msg;
+      else STOCK_CACHE[key] = {error: msg};
+      return;
+    }
+    const items = parseStockSheet(wsStock);
+    // La hoja "Gavetas - nuevo" (ubicación + modelos) está en los 5 archivos, no solo en General.
+    const wsGav = findSheetCaseInsensitive(wb, 'Gavetas - nuevo');
+    if(wsGav){
+      const ubicaciones = parseGavetasSheet(wsGav);
+      items.forEach(it => {
+        const info = ubicaciones[it.codigo];
+        it.ubicacion = info ? info.ubicacion : '';
+        it.modelos = info ? info.modelos : '';
+      });
+    }
+    STOCK_CACHE[key] = {items, fetchedAt: Date.now(), fileName: file.name};
+    saveStockCache();
+  }catch(e){
+    console.error(e);
+    const msg = 'No se pudo leer el archivo desde Drive. Probá "Actualizar" de nuevo.';
+    if(STOCK_CACHE[key] && STOCK_CACHE[key].items) STOCK_CACHE[key].lastError = msg;
+    else STOCK_CACHE[key] = {error: msg};
+  } finally {
+    STOCK_LOADING[key] = false;
+    if(state.stockSource===key){ renderStockFilterChips(); renderStockList(); }
+  }
+}
+
+// Pide el login solo una vez y, apenas lo consigue, aprovecha para traer las 5 fuentes
+// (General + los 4 técnicos), no solo la que se pidió. Así, cuando Google pide credenciales
+// en cualquiera de los depósitos, los demás quedan actualizados también.
+function fetchStockSource(key, force){
+  if(!force && STOCK_CACHE[key] && STOCK_CACHE[key].items){ renderStockList(); return; }
+  if(STOCK_SOURCES.some(s=>STOCK_LOADING[s.key])) return; // ya hay una actualización en curso
+  STOCK_SOURCES.forEach(s=>{ STOCK_LOADING[s.key] = true; });
+  renderStockList();
+  const ordenFuentes = [key, ...STOCK_SOURCES.map(s=>s.key).filter(k=>k!==key)];
+  ensureGoogleAuth(async ()=>{
+    for(const k of ordenFuentes){
+      await fetchOneSourceInner(k);
+    }
+  }, ()=>{
+    STOCK_SOURCES.forEach(s=>{ STOCK_LOADING[s.key] = false; });
+    renderStockList();
+  });
 }
 
 function openStockConfigSheet(){
