@@ -1398,7 +1398,7 @@ function renderStockList(){
     (!q || it.codigo.toLowerCase().includes(q) || it.descripcion.toLowerCase().includes(q)) &&
     (state.stockCeroFilter==='todos' || (state.stockCeroFilter==='cero') === (Number(it.saldo)===0)) &&
     (!state.stockModelFilters.length || splitModelos(it.modelos).some(m=>state.stockModelFilters.some(sel=>sel.toLowerCase()===m.toLowerCase())))
-  );
+  ).sort(compareUbicacion);
 
   if(filtered.length===0){
     container.innerHTML = emptyStateHtml(
