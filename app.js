@@ -1253,13 +1253,19 @@ function diffBadgeHtml(saldo, conteo){
   return `<div class="inv-diff bad">${diff>0?'+':''}${diff}</div>`;
 }
 
+// Los códigos con saldo 0 en el sistema no tiene sentido contarlos en el inventario físico.
+function itemsParaInventario(cached){
+  return cached.items.filter(it => Number(it.saldo) !== 0);
+}
+
 function renderInventarioSummary(){
   const cached = STOCK_CACHE[state.stockSource];
   if(!cached || !cached.items) return;
   const inv = INVENTARIO[state.stockSource] || {};
-  const total = cached.items.length;
+  const items = itemsParaInventario(cached);
+  const total = items.length;
   let contados = 0, diferencias = 0;
-  cached.items.forEach(it=>{
+  items.forEach(it=>{
     const c = inv[it.codigo];
     if(c && c.conteo!==undefined && c.conteo!==''){
       contados++;
@@ -1277,8 +1283,13 @@ function renderInventarioList(){
   const cached = STOCK_CACHE[state.stockSource];
   if(!cached || !cached.items) return;
   const inv = INVENTARIO[state.stockSource] || {};
-  const sorted = [...cached.items].sort(compareUbicacion);
+  const sorted = itemsParaInventario(cached).sort(compareUbicacion);
   const list = document.getElementById('inventarioList');
+  if(sorted.length===0){
+    list.innerHTML = emptyStateHtml('No hay códigos con saldo distinto de cero para inventariar en este depósito.');
+    renderInventarioSummary();
+    return;
+  }
   list.innerHTML = sorted.map(it=>{
     const c = inv[it.codigo];
     const conteo = c ? c.conteo : '';
@@ -1325,7 +1336,7 @@ function exportarInventario(){
   if(!cached || !cached.items) return;
   const inv = INVENTARIO[state.stockSource] || {};
   const source = STOCK_SOURCES.find(s=>s.key===state.stockSource);
-  const filas = [...cached.items].sort(compareUbicacion).map(it=>{
+  const filas = itemsParaInventario(cached).sort(compareUbicacion).map(it=>{
     const c = inv[it.codigo];
     const conteo = c ? c.conteo : '';
     return {
