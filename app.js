@@ -1121,7 +1121,7 @@ function parseGavetasSheet(ws){
     const ubicacion = String(r[5]||'').trim();// F
     const modelos = String(r[7]||'').trim();  // H
     const partes = [atributo, estante, ubicacion].filter(p=>p!=='');
-    map[codigo] = {ubicacion: partes.join('-'), modelos};
+    map[codigo] = {ubicacion: partes.join('-'), modelos, atributo, estante, ubic: ubicacion};
   });
   return map;
 }
@@ -1207,6 +1207,139 @@ function openStockModelSheet(){
     });
   });
   openSheet('stockModelSheet');
+}
+
+// ================= Inventario (conteo físico vs. stock del sistema) =================
+const LS_INVENTARIO = 'mant_inventario_v1';
+function loadInventario(){
+  try{ return JSON.parse(localStorage.getItem(LS_INVENTARIO)||'{}'); }catch(e){ return {}; }
+}
+function saveInventario(){ localStorage.setItem(LS_INVENTARIO, JSON.stringify(INVENTARIO)); }
+let INVENTARIO = loadInventario(); // {sourceKey: {codigo: {conteo:Number, fecha:'YYYY-MM-DD'}}}
+
+// Orden pedido: Atributo, luego Estante, luego Ubicación. Los códigos sin ubicación
+// asignada quedan al final (con "\uffff" hacemos que ordenen después de cualquier texto).
+function ubicacionSortKey(it){
+  const na = (it.atributo||'').trim();
+  const ne = (it.estante||'').trim();
+  const nu = (it.ubic||'').trim();
+  return [na || '\uffff', ne || '\uffff', nu || '\uffff'];
+}
+function compareUbicacion(a,b){
+  const ka = ubicacionSortKey(a), kb = ubicacionSortKey(b);
+  for(let i=0;i<3;i++){
+    const c = ka[i].localeCompare(kb[i], 'es', {numeric:true, sensitivity:'base'});
+    if(c!==0) return c;
+  }
+  return a.codigo.localeCompare(b.codigo);
+}
+
+function openInventarioSheet(){
+  const cached = STOCK_CACHE[state.stockSource];
+  if(!cached || !cached.items){
+    alert('Primero cargá el stock de esta fuente (botón "Cargar stock" o "Actualizar").');
+    return;
+  }
+  const source = STOCK_SOURCES.find(s=>s.key===state.stockSource);
+  document.getElementById('inventarioTitle').textContent = `Inventario · ${source.label}`;
+  renderInventarioList();
+  openSheet('inventarioSheet');
+}
+
+function diffBadgeHtml(saldo, conteo){
+  if(conteo===undefined || conteo===null || conteo==='') return `<div class="inv-diff pending">Sin contar</div>`;
+  const diff = Number(conteo) - Number(saldo);
+  if(diff===0) return `<div class="inv-diff ok">Coincide</div>`;
+  return `<div class="inv-diff bad">${diff>0?'+':''}${diff}</div>`;
+}
+
+function renderInventarioSummary(){
+  const cached = STOCK_CACHE[state.stockSource];
+  if(!cached || !cached.items) return;
+  const inv = INVENTARIO[state.stockSource] || {};
+  const total = cached.items.length;
+  let contados = 0, diferencias = 0;
+  cached.items.forEach(it=>{
+    const c = inv[it.codigo];
+    if(c && c.conteo!==undefined && c.conteo!==''){
+      contados++;
+      if(Number(c.conteo) !== Number(it.saldo)) diferencias++;
+    }
+  });
+  document.getElementById('inventarioSummary').innerHTML = `
+    <div class="plan-stat"><div class="n">${total}</div><div class="l">Códigos</div></div>
+    <div class="plan-stat"><div class="n">${contados}</div><div class="l">Contados</div></div>
+    <div class="plan-stat"><div class="n" style="color:${diferencias>0?'var(--red)':'var(--text)'};">${diferencias}</div><div class="l">Diferencias</div></div>
+  `;
+}
+
+function renderInventarioList(){
+  const cached = STOCK_CACHE[state.stockSource];
+  if(!cached || !cached.items) return;
+  const inv = INVENTARIO[state.stockSource] || {};
+  const sorted = [...cached.items].sort(compareUbicacion);
+  const list = document.getElementById('inventarioList');
+  list.innerHTML = sorted.map(it=>{
+    const c = inv[it.codigo];
+    const conteo = c ? c.conteo : '';
+    const ubicLabel = it.ubicacion ? it.ubicacion : 'Sin ubicación asignada';
+    return `
+    <div class="inv-row" data-codigo="${escapeHtml(it.codigo)}">
+      <div class="inv-ubic">${escapeHtml(ubicLabel)}</div>
+      <div class="cliente">${escapeHtml(it.codigo)}</div>
+      <div class="desc">${escapeHtml(it.descripcion)}</div>
+      <div class="inv-row-bottom">
+        <div class="inv-sys">Sistema: ${escapeHtml(String(it.saldo))}</div>
+        <input type="number" class="inv-count-input" inputmode="numeric" placeholder="Contar" value="${conteo}">
+        <span class="inv-diff-slot">${diffBadgeHtml(it.saldo, conteo)}</span>
+      </div>
+    </div>`;
+  }).join('');
+  renderInventarioSummary();
+
+  // Un solo listener por delegación: no se pierde el foco al tipear y funciona con toda la lista.
+  list.oninput = (ev)=>{
+    if(!ev.target.classList.contains('inv-count-input')) return;
+    const row = ev.target.closest('.inv-row');
+    const codigo = row.dataset.codigo;
+    const val = ev.target.value;
+    if(!INVENTARIO[state.stockSource]) INVENTARIO[state.stockSource] = {};
+    if(val===''){
+      delete INVENTARIO[state.stockSource][codigo];
+    } else {
+      INVENTARIO[state.stockSource][codigo] = {conteo: Number(val), fecha: todayStr()};
+    }
+    saveInventario();
+    const item = cached.items.find(x=>x.codigo===codigo);
+    row.querySelector('.inv-diff-slot').innerHTML = diffBadgeHtml(item.saldo, val);
+    renderInventarioSummary();
+  };
+}
+
+function exportarInventario(){
+  if(typeof XLSX === 'undefined'){
+    alert('No se pudo cargar la librería de Excel. Revisá que el celular tenga conexión a internet e intentá de nuevo.');
+    return;
+  }
+  const cached = STOCK_CACHE[state.stockSource];
+  if(!cached || !cached.items) return;
+  const inv = INVENTARIO[state.stockSource] || {};
+  const source = STOCK_SOURCES.find(s=>s.key===state.stockSource);
+  const filas = [...cached.items].sort(compareUbicacion).map(it=>{
+    const c = inv[it.codigo];
+    const conteo = c ? c.conteo : '';
+    return {
+      'Atributo': it.atributo||'', 'Estante': it.estante||'', 'Ubicación': it.ubic||'',
+      'Código': it.codigo, 'Descripción': it.descripcion,
+      'Stock sistema': it.saldo, 'Conteo físico': conteo,
+      'Diferencia': conteo===''? '' : (Number(conteo)-Number(it.saldo)),
+      'Fecha conteo': c ? c.fecha : ''
+    };
+  });
+  const wb = XLSX.utils.book_new();
+  const ws = XLSX.utils.json_to_sheet(filas);
+  XLSX.utils.book_append_sheet(wb, ws, 'Inventario');
+  XLSX.writeFile(wb, `inventario_${source.label.replace(/\s+/g,'_')}_${todayStr()}.xlsx`);
 }
 
 function stockItemHtml(item){
@@ -1313,6 +1446,9 @@ async function fetchOneSourceInner(key){
         const info = ubicaciones[it.codigo];
         it.ubicacion = info ? info.ubicacion : '';
         it.modelos = info ? info.modelos : '';
+        it.atributo = info ? info.atributo : '';
+        it.estante = info ? info.estante : '';
+        it.ubic = info ? info.ubic : '';
       });
     }
     STOCK_CACHE[key] = {items, fetchedAt: Date.now(), fileName: file.name};
@@ -1489,6 +1625,17 @@ document.getElementById('backupClose').addEventListener('click', ()=>closeSheet(
 document.getElementById('stockSearchInput').addEventListener('input', (e)=>{ state.stockSearch = e.target.value; renderStockList(); });
 document.getElementById('stockModelFilterBtn').addEventListener('click', openStockModelSheet);
 document.getElementById('stockModelClose').addEventListener('click', ()=>closeSheet('stockModelSheet'));
+document.getElementById('btnInventario').addEventListener('click', openInventarioSheet);
+document.getElementById('inventarioClose').addEventListener('click', ()=>closeSheet('inventarioSheet'));
+document.getElementById('inventarioExportar').addEventListener('click', exportarInventario);
+document.getElementById('inventarioReiniciar').addEventListener('click', ()=>{
+  const source = STOCK_SOURCES.find(s=>s.key===state.stockSource);
+  if(confirm(`¿Borrar todo el conteo de inventario de "${source.label}"? Esto no afecta el stock del sistema, solo lo que contaste.`)){
+    INVENTARIO[state.stockSource] = {};
+    saveInventario();
+    renderInventarioList();
+  }
+});
 document.getElementById('btnStockRefresh').addEventListener('click', ()=> fetchStockSource(state.stockSource, true));
 document.getElementById('btnStockConfig').addEventListener('click', openStockConfigSheet);
 document.getElementById('stockConfigClose').addEventListener('click', ()=>closeSheet('stockConfigSheet'));
