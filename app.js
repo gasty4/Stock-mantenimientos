@@ -231,6 +231,13 @@ function applyFilters(list){
     switch(state.sortBy){
       case 'distancia': return distOf(a)-distOf(b);
       case 'vencimiento': return dueYM(a)-dueYM(b);
+      case 'ultimoMantenimiento': {
+        const da = a.ultimo_mantenimiento, db = b.ultimo_mantenimiento;
+        if(!da && !db) return 0;
+        if(!da) return 1; // sin fecha registrada va al final
+        if(!db) return -1;
+        return da.localeCompare(db); // más antiguo primero
+      }
       case 'tipo_abono': return a.tipo_abono.localeCompare(b.tipo_abono);
       case 'estado': return ESTADOS.indexOf(dominantEstado(a))-ESTADOS.indexOf(dominantEstado(b));
       case 'localidad': return a.localidad.localeCompare(b.localidad);
@@ -384,18 +391,18 @@ function renderTodos(){
 let dragCtx = null;
 
 function currentPlanTasks(){
-  return TASKS.filter(t=>t.fecha_planificada===state.planDate).sort((a,b)=>(a.orden_plan||0)-(b.orden_plan||0));
+  // Solo sucursales que todavía tienen algo pendiente: una vez resuelta, se saca de Planificar.
+  return TASKS.filter(t=>t.fecha_planificada===state.planDate && !estaResuelta(t))
+    .sort((a,b)=>(a.orden_plan||0)-(b.orden_plan||0));
 }
 
 function renderPlan(){
   document.getElementById('planDate').value = state.planDate;
-  const dayTasks = currentPlanTasks();
-  const pend = dayTasks.filter(t=>!estaResuelta(t)).length;
-  const hechas = dayTasks.length - pend;
+  const dayTasks = currentPlanTasks(); // ya vienen filtradas: solo las que siguen pendientes
+  const totalKm = dayTasks.reduce((s,t)=> s + (typeof t.distancia_km==='number' ? t.distancia_km : 0), 0);
   document.getElementById('planSummary').innerHTML = `
-    <div class="plan-stat"><div class="n">${dayTasks.length}</div><div class="l">Paradas</div></div>
-    <div class="plan-stat"><div class="n">${pend}</div><div class="l">Pendientes</div></div>
-    <div class="plan-stat"><div class="n">${hechas}</div><div class="l">Resueltas</div></div>
+    <div class="plan-stat"><div class="n">${dayTasks.length}</div><div class="l">Paradas pendientes</div></div>
+    <div class="plan-stat"><div class="n">${totalKm}</div><div class="l">Km estimados</div></div>
   `;
   const container = document.getElementById('planList');
   if(dayTasks.length===0){
@@ -480,7 +487,7 @@ function onDragStart(ev){
 
 function openPlanPicker(){
   const body = document.getElementById('planPickerBody');
-  const candidates = TASKS.filter(t=>t.fecha_planificada!==state.planDate).sort((a,b)=>distOf(a)-distOf(b));
+  const candidates = TASKS.filter(t=>t.fecha_planificada!==state.planDate && !estaResuelta(t)).sort((a,b)=>distOf(a)-distOf(b));
   if(candidates.length===0){
     body.innerHTML = emptyStateHtml('No quedan tareas para agregar.');
   } else {
@@ -761,7 +768,7 @@ function openDistSheet(){
 
 // ================= Filter sheet =================
 function renderFilterSheet(){
-  const sortLabels = {distancia:'Distancia', vencimiento:'Mes de vencimiento', tipo_abono:'Tipo de abono', estado:'Estado', localidad:'Localidad', cliente:'Cliente'};
+  const sortLabels = {distancia:'Distancia', vencimiento:'Mes de vencimiento', ultimoMantenimiento:'Último mantenimiento', tipo_abono:'Tipo de abono', estado:'Estado', localidad:'Localidad', cliente:'Cliente'};
   document.getElementById('sortOptions').innerHTML = Object.entries(sortLabels).map(([k,v])=>
     `<div class="option-btn ${state.sortBy===k?'active':''}" data-sort="${k}">${v}</div>`).join('');
   document.getElementById('tipoOptions').innerHTML = ['Todos',...TIPOS].map(t=>
