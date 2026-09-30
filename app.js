@@ -13,7 +13,10 @@ function esPuntual(t){ return TIPOS_PUNTUALES.includes(t.tipo_abono); }
 let TASKS = [];
 let DIST = {};
 
-function saveTasks(t){ localStorage.setItem(LS_TASKS, JSON.stringify(t)); }
+function saveTasks(t){
+  localStorage.setItem(LS_TASKS, JSON.stringify(t));
+  programarAutoBackup();
+}
 function saveDist(d){ localStorage.setItem(LS_DIST, JSON.stringify(d)); }
 
 async function loadSeedData(){
@@ -114,28 +117,43 @@ function nowYM(){ const d = new Date(); return d.getFullYear()*12 + d.getMonth()
 
 function isOverdue(t){ return !esPuntual(t) && dueYM(t) < nowYM(); }
 
-function processRenewals(){
-  let renewedCount = 0;
+// Tareas que ya se marcaron (total o parcialmente) pero cuyo mes de vencimiento ya pasó:
+// están listas para pasar al ciclo siguiente (volver a Pendiente), pero no lo hacemos solos
+// sin avisar — se muestra el banner de renovación y el usuario confirma.
+function getRenewalCandidates(){
+  const list = [];
   TASKS.forEach(t=>{
     if(esPuntual(t)) return; // OTS/OTA son puntuales: no vencen ni se renuevan solos
+    if(dueYM(t) < nowYM() && !isFullyPending(t)) list.push(t);
+  });
+  return list;
+}
+
+function aplicarRenovaciones(list){
+  let count = 0;
+  list.forEach(t=>{
     const interval = INTERVALO[t.tipo_abono] || 3;
     let guard = 0;
     while(dueYM(t) < nowYM() && guard < 60){
       guard++;
-      if(isFullyPending(t)){
-        // quedó sin marcar de ninguna manera: no se renueva solo, se avisa (vencido)
-        break;
-      }
-      // se marcó (total o parcialmente): renovar ciclo, todo vuelve a Pendiente
+      if(isFullyPending(t)) break; // por si cambió mientras tanto
       const total = t.mes_vencimiento - 1 + interval;
       t.anio_vencimiento = t.anio_vencimiento + Math.floor(total/12);
       t.mes_vencimiento = (total % 12) + 1;
       setAllTo(t, 'Pendiente');
       t.fecha_planificada = null;
-      renewedCount++;
+      count++;
     }
   });
-  if(renewedCount>0) saveTasks(TASKS);
+  if(count>0) saveTasks(TASKS);
+  return count;
+}
+
+// Aplica de una, sin aviso previo — para usar después de importar un Excel o restaurar un
+// backup, donde normalizar los datos de una tiene sentido (no es el aviso mensual al abrir
+// la app, que se maneja aparte con el banner de renovación).
+function processRenewals(){
+  aplicarRenovaciones(getRenewalCandidates());
 }
 function overdueUnresolved(){
   return TASKS.filter(t => isOverdue(t) && isFullyPending(t));
@@ -856,6 +874,7 @@ function renderAll(){
   if(isStock){
     document.getElementById('pageSub').style.display = 'none';
     document.getElementById('overdueBanner').style.display = 'none';
+    document.getElementById('renewalBanner').style.display = 'none';
   } else {
     document.getElementById('pageSub').style.display = 'block';
     renderStateChips();
@@ -876,13 +895,18 @@ function renderAll(){
 // ================= Copia de seguridad (Excel + Google Drive) =================
 const LS_GDRIVE_CLIENTID = 'mant_gdrive_clientid';
 const LS_GDRIVE_LAST_BACKUP = 'mant_gdrive_last_backup';
+// Client ID ya configurado por el usuario en Google Cloud. Va guardado acá (no solo en
+// localStorage) para que la app pueda seguir usando Drive aunque se borren los datos del
+// navegador: así, después de un borrado de Chrome, alcanza con tocar "Restaurar desde Drive".
+const DEFAULT_GDRIVE_CLIENT_ID = '653986354110-vt56p49fgb2igfuqflj0tk5nipsvsvna.apps.googleusercontent.com';
+function getGDriveClientId(){ return localStorage.getItem(LS_GDRIVE_CLIENTID) || DEFAULT_GDRIVE_CLIENT_ID; }
 let gTokenClient = null;
 let gAccessToken = null;
 
 function openBackupSheet(){ renderBackupSheet(); openSheet('backupSheet'); }
 
 function renderBackupSheet(){
-  const clientId = localStorage.getItem(LS_GDRIVE_CLIENTID) || '';
+  const clientId = getGDriveClientId();
   const lastBackup = localStorage.getItem(LS_GDRIVE_LAST_BACKUP);
   document.getElementById('backupBody').innerHTML = `
     <div class="field-label">Excel</div>
@@ -890,8 +914,8 @@ function renderBackupSheet(){
     <button class="primary-btn" id="backupImportExcel" style="background:var(--panel-2);color:var(--text);border:1px solid var(--border);">Importar desde Excel</button>
 
     <div class="field-label">Google Drive</div>
-    ${lastBackup ? `<div class="dist-sum-hint">Última copia en Drive: ${new Date(lastBackup).toLocaleString('es-AR')}</div>` : `<div class="dist-sum-hint">Todavía no hiciste ninguna copia a Drive.</div>`}
-    <input type="text" id="gdriveClientId" placeholder="Client ID de Google (una sola vez)" value="${escapeHtml(clientId)}" style="margin-top:10px;">
+    ${lastBackup ? `<div class="dist-sum-hint">Última copia en Drive: ${new Date(lastBackup).toLocaleString('es-AR')} (se guarda sola cada vez que cambia algo)</div>` : `<div class="dist-sum-hint">Todavía no hiciste ninguna copia a Drive.</div>`}
+    <input type="text" id="gdriveClientId" placeholder="Client ID de Google (ya viene configurado)" value="${escapeHtml(clientId)}" style="margin-top:10px;">
     <button class="link-btn" id="gdriveSaveClientId" style="padding:8px 0;">Guardar Client ID</button>
     <button class="primary-btn" id="backupToDrive">Hacer copia de seguridad a Drive</button>
     <button class="primary-btn" id="restoreFromDrive" style="background:var(--panel-2);color:var(--text);border:1px solid var(--border);">Restaurar desde Drive</button>
@@ -905,7 +929,7 @@ function renderBackupSheet(){
     gTokenClient = null; // se reconstruye con el nuevo client id
     alert('Client ID guardado.');
   });
-  document.getElementById('backupToDrive').addEventListener('click', backupToDrive);
+  document.getElementById('backupToDrive').addEventListener('click', ()=>backupToDrive(false));
   document.getElementById('restoreFromDrive').addEventListener('click', restoreFromDrive);
 }
 
@@ -918,33 +942,32 @@ function autoguardarClientIdSiHaceFalta(){
   }
 }
 
+function getTokenClient(){
+  if(!gTokenClient){
+    gTokenClient = google.accounts.oauth2.initTokenClient({
+      client_id: getGDriveClientId(),
+      // drive.file: para el backup propio. drive.readonly: para poder leer los 5 excel
+      // de stock que ya existen en tu Drive (no fueron creados por esta app).
+      scope: 'https://www.googleapis.com/auth/drive.file https://www.googleapis.com/auth/drive.readonly',
+      callback: ()=>{} // se reemplaza en cada llamada
+    });
+  }
+  return gTokenClient;
+}
+
 function ensureGoogleAuth(onReady, onFail){
   autoguardarClientIdSiHaceFalta();
-  const clientId = localStorage.getItem(LS_GDRIVE_CLIENTID);
-  if(!clientId){
-    alert('Todavía no hay un Client ID de Google cargado. Pegalo en el campo "Client ID de Google" de esta pantalla y volvé a tocar el botón.');
-    if(onFail) onFail();
-    return;
-  }
   if(typeof google === 'undefined' || !google.accounts || !google.accounts.oauth2){
     alert('No se pudo cargar el inicio de sesión de Google. Revisá que el celular tenga conexión a internet e intentá de nuevo.');
     if(onFail) onFail();
     return;
   }
-  if(!gTokenClient){
-    gTokenClient = google.accounts.oauth2.initTokenClient({
-      client_id: clientId,
-      // drive.file: para el backup propio. drive.readonly: para poder leer los 5 excel
-      // de stock que ya existen en tu Drive (no fueron creados por esta app).
-      scope: 'https://www.googleapis.com/auth/drive.file https://www.googleapis.com/auth/drive.readonly',
-      callback: ()=>{} // se reemplaza en cada llamada, ver pedirToken()
-    });
-  }
+  const client = getTokenClient();
   // Primero probamos en silencio (sin mostrar ninguna pantalla de Google): si ya diste el
   // permiso antes y seguís logueado en este navegador, Google devuelve el token solo.
   // Solo si eso falla mostramos la pantalla de "Acceder con Google" de nuevo.
   const pedirToken = (silencioso)=>{
-    gTokenClient.callback = (resp)=>{
+    client.callback = (resp)=>{
       if(resp.error){
         if(silencioso){
           pedirToken(false); // reintenta mostrando la pantalla de Google
@@ -957,9 +980,23 @@ function ensureGoogleAuth(onReady, onFail){
       gAccessToken = resp.access_token;
       onReady();
     };
-    gTokenClient.requestAccessToken({prompt: silencioso ? '' : 'consent'});
+    client.requestAccessToken({prompt: silencioso ? '' : 'consent'});
   };
   pedirToken(true);
+}
+
+// Variante para el guardado automático en segundo plano: solo intenta en silencio, y si no
+// se puede (todavía no diste el permiso, o la sesión expiró) se rinde sin avisar nada ni
+// mostrar la pantalla de Google — para no interrumpir mientras estás trabajando.
+function ensureGoogleAuthSilencioso(onReady){
+  if(typeof google === 'undefined' || !google.accounts || !google.accounts.oauth2) return;
+  const client = getTokenClient();
+  client.callback = (resp)=>{
+    if(resp.error) return;
+    gAccessToken = resp.access_token;
+    onReady();
+  };
+  client.requestAccessToken({prompt:''});
 }
 
 async function findDriveBackupFile(){
@@ -972,33 +1009,54 @@ async function findDriveBackupFile(){
   return (data.files && data.files[0]) || null;
 }
 
-function backupToDrive(){
-  ensureGoogleAuth(async ()=>{
-    try{
-      const existing = await findDriveBackupFile();
-      const payload = JSON.stringify({tasks: TASKS, dist: DIST, exportado: new Date().toISOString()});
-      const boundary = 'mant_backup_boundary';
-      const metadata = {name:'mantenimientos_backup.json', mimeType:'application/json'};
-      const body =
-        `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${existing?'{}':JSON.stringify(metadata)}\r\n`+
-        `--${boundary}\r\nContent-Type: application/json\r\n\r\n${payload}\r\n--${boundary}--`;
-      const url = existing
-        ? `https://www.googleapis.com/upload/drive/v3/files/${existing.id}?uploadType=multipart`
-        : `https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart`;
-      const res = await fetch(url, {
-        method: existing ? 'PATCH' : 'POST',
-        headers: {Authorization:`Bearer ${gAccessToken}`, 'Content-Type': `multipart/related; boundary=${boundary}`},
-        body
-      });
-      if(!res.ok) throw new Error('HTTP '+res.status);
-      localStorage.setItem(LS_GDRIVE_LAST_BACKUP, new Date().toISOString());
-      alert('Copia de seguridad guardada en Google Drive.');
-      renderBackupSheet();
-    }catch(e){
-      console.error(e);
-      alert('No se pudo guardar la copia en Drive. Probá de nuevo o revisá el Client ID.');
-    }
+async function subirBackupADrive(){
+  const existing = await findDriveBackupFile();
+  const payload = JSON.stringify({tasks: TASKS, dist: DIST, exportado: new Date().toISOString()});
+  const boundary = 'mant_backup_boundary';
+  const metadata = {name:'mantenimientos_backup.json', mimeType:'application/json'};
+  const body =
+    `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${existing?'{}':JSON.stringify(metadata)}\r\n`+
+    `--${boundary}\r\nContent-Type: application/json\r\n\r\n${payload}\r\n--${boundary}--`;
+  const url = existing
+    ? `https://www.googleapis.com/upload/drive/v3/files/${existing.id}?uploadType=multipart`
+    : `https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart`;
+  const res = await fetch(url, {
+    method: existing ? 'PATCH' : 'POST',
+    headers: {Authorization:`Bearer ${gAccessToken}`, 'Content-Type': `multipart/related; boundary=${boundary}`},
+    body
   });
+  if(!res.ok) throw new Error('HTTP '+res.status);
+  localStorage.setItem(LS_GDRIVE_LAST_BACKUP, new Date().toISOString());
+}
+
+// manual=true: la tocó el usuario (avisa con alert y refresca la pantalla de backup).
+// manual=false: automático en segundo plano (silencioso, no interrumpe con nada).
+function backupToDrive(manual){
+  if(manual===undefined) manual = true;
+  if(manual){
+    ensureGoogleAuth(async ()=>{
+      try{
+        await subirBackupADrive();
+        alert('Copia de seguridad guardada en Google Drive.');
+        renderBackupSheet();
+      }catch(e){
+        console.error(e);
+        alert('No se pudo guardar la copia en Drive. Probá de nuevo o revisá el Client ID.');
+      }
+    });
+  } else {
+    ensureGoogleAuthSilencioso(async ()=>{
+      try{ await subirBackupADrive(); }catch(e){ console.error('Auto-backup a Drive falló:', e); }
+    });
+  }
+}
+
+// Guardado automático: cada vez que se guardan tareas, programamos una subida a Drive
+// (con espera, para no subir en cada tecla si hay varios cambios seguidos).
+let autoBackupTimer = null;
+function programarAutoBackup(){
+  clearTimeout(autoBackupTimer);
+  autoBackupTimer = setTimeout(()=> backupToDrive(false), 4000);
 }
 
 function restoreFromDrive(){
@@ -1677,6 +1735,49 @@ function shiftPlanDate(delta){
 }
 
 // ================= Init =================
+// ================= Banner de recuperación (la app arrancó sin datos guardados) =================
+function mostrarBannerRecuperacion(){
+  const banner = document.getElementById('recoveryBanner');
+  banner.style.display = 'flex';
+  banner.innerHTML = `
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2a5 5 0 0 0-5 5v1.05A5.5 5.5 0 0 0 8.5 19H17a4 4 0 0 0 .5-7.96A5 5 0 0 0 12 2z"/></svg>
+    <p>Se cargaron los datos originales. Si ya usabas la app en este celu, restaurá tu última copia de Drive.</p>
+    <div class="rb-btns">
+      <button id="recoveryRestoreBtn">Restaurar</button>
+      <button class="rb-dismiss" id="recoveryDismissBtn">Ahora no</button>
+    </div>
+  `;
+  document.getElementById('recoveryRestoreBtn').addEventListener('click', ()=>{
+    restoreFromDrive();
+  });
+  document.getElementById('recoveryDismissBtn').addEventListener('click', ()=>{
+    banner.style.display = 'none';
+  });
+}
+
+// Aviso antes de renovar al mes nuevo: se muestra en vez de renovar en silencio.
+function mostrarBannerRenovacion(list){
+  const banner = document.getElementById('renewalBanner');
+  banner.style.display = 'flex';
+  const n = list.length;
+  banner.innerHTML = `
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+    <p>Hay ${n} mantenimiento${n===1?'':'s'} resuelto${n===1?'':'s'} listo${n===1?'':'s'} para renovarse al mes nuevo (vuelve${n===1?'':'n'} a Pendiente para el próximo ciclo).</p>
+    <div class="rb-btns">
+      <button id="renewalApplyBtn">Renovar ahora</button>
+      <button class="rb-dismiss" id="renewalDismissBtn">Todavía no</button>
+    </div>
+  `;
+  document.getElementById('renewalApplyBtn').addEventListener('click', ()=>{
+    aplicarRenovaciones(list);
+    banner.style.display = 'none';
+    renderAll();
+  });
+  document.getElementById('renewalDismissBtn').addEventListener('click', ()=>{
+    banner.style.display = 'none';
+  });
+}
+
 async function boot(){
   const rawT = localStorage.getItem(LS_TASKS);
   const rawD = localStorage.getItem(LS_DIST);
@@ -1695,9 +1796,11 @@ async function boot(){
 
   normalizeTasks();
   syncDistancias();
-  processRenewals();
+  const renewalCandidates = getRenewalCandidates();
   document.getElementById('planDate').value = state.planDate;
   renderAll();
+  if(!rawT) mostrarBannerRecuperacion();
+  else if(renewalCandidates.length>0) mostrarBannerRenovacion(renewalCandidates);
 }
 boot();
 
