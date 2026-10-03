@@ -212,6 +212,9 @@ function fmtKm(t){
 function uniqueLocalidades(){
   return [...new Set(TASKS.map(t=>t.localidad))].sort((a,b)=>a.localeCompare(b));
 }
+function uniqueClientes(){
+  return [...new Set(TASKS.map(t=>t.cliente).filter(Boolean))].sort((a,b)=>a.localeCompare(b));
+}
 function escapeHtml(s){
   return String(s==null?'':s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 }
@@ -566,9 +569,18 @@ function openTaskModal(id){
 
     ${distEditorHtml(t)}
 
+    <div class="field-label">Cliente</div>
+    <input type="text" id="editCliente" list="clienteListEdit" value="${escapeHtml(t.cliente||'')}">
+    <datalist id="clienteListEdit">${uniqueClientes().map(c=>`<option value="${escapeHtml(c)}">`).join('')}</datalist>
+
+    <div class="field-label">Localidad</div>
+    <input type="text" id="editLocalidad" list="locListEdit" value="${escapeHtml(t.localidad||'')}">
+    <datalist id="locListEdit">${uniqueLocalidades().map(l=>`<option value="${escapeHtml(l)}">`).join('')}</datalist>
+
+    <div class="field-label">Dirección</div>
+    <input type="text" id="editDireccion" value="${escapeHtml(t.direccion||'')}">
+
     <div class="field-label">Datos del local</div>
-    <div class="detail-row"><div class="k">Localidad</div><div class="v">${escapeHtml(t.localidad||'')}</div></div>
-    <div class="detail-row"><div class="k">Dirección</div><div class="v">${escapeHtml(t.direccion||'—')}</div></div>
     <div class="detail-row"><div class="k">Distancia</div><div class="v">${fmtKm(t)}</div></div>
 
     <div class="field-label">Modelo de equipo</div>
@@ -631,6 +643,10 @@ function openTaskModal(id){
   document.getElementById('modalSave').addEventListener('click', ()=>{
     const nuevaCantidad = parseInt(document.getElementById('editCantidad').value,10) || 1;
     const otrosCambios = ()=>{
+      t.cliente = document.getElementById('editCliente').value.trim();
+      t.localidad = document.getElementById('editLocalidad').value.trim();
+      t.direccion = document.getElementById('editDireccion').value.trim();
+      syncDistancias(); // si la localidad ya tiene distancia guardada, la toma; si no, deja la que tenía
       t.modelo = document.getElementById('editModelo').value.trim();
       t.tipo_abono = document.getElementById('editTipoAbono').value;
       t.mes_vencimiento = parseInt(document.getElementById('editMes').value,10);
@@ -704,9 +720,11 @@ function openTaskModal(id){
 // ================= Agregar nueva tarea =================
 function openAddSheet(){
   const locs = uniqueLocalidades();
+  const clientes = uniqueClientes();
   document.getElementById('addBody').innerHTML = `
     <div class="field-label">Cliente</div>
-    <input type="text" id="newCliente" placeholder="Nombre del cliente / sucursal">
+    <input type="text" id="newCliente" list="clienteList" placeholder="Nombre del cliente / sucursal">
+    <datalist id="clienteList">${clientes.map(c=>`<option value="${escapeHtml(c)}">`).join('')}</datalist>
     <div class="field-label">Localidad</div>
     <input type="text" id="newLocalidad" list="locList" placeholder="Localidad">
     <datalist id="locList">${locs.map(l=>`<option value="${escapeHtml(l)}">`).join('')}</datalist>
@@ -1756,22 +1774,80 @@ function mostrarBannerRecuperacion(){
 }
 
 // Aviso antes de renovar al mes nuevo: se muestra en vez de renovar en silencio.
+// Sube un .xlsx nuevo a Drive (no pisa el anterior: queda un archivo por cada renovación)
+// con el detalle de lo que se hizo este ciclo, antes de resetear esas tareas a Pendiente.
+async function subirHistorialRenovacion(list){
+  const filas = list.map(t=>({
+    'Cliente': t.cliente||'', 'Localidad': t.localidad||'', 'Dirección': t.direccion||'',
+    'Modelo': t.modelo||'', 'Cantidad equipos': t.cantidad, 'Tipo de abono': t.tipo_abono,
+    'Ciclo que termina': MONTHS[t.mes_vencimiento-1]+' '+t.anio_vencimiento,
+    'Pendiente': distTotal(t,'Pendiente'), 'Lista': distTotal(t,'Lista'),
+    'MND': distTotal(t,'MND'), 'Asociar': distTotal(t,'Asociar'),
+    'Observaciones': t.nota||''
+  }));
+  const registroRows = [];
+  list.forEach(t=>{
+    (t.registro||[]).forEach(r=>{
+      registroRows.push({'Cliente': t.cliente||'', 'Localidad': t.localidad||'', 'Fecha': r.fecha, 'Detalle': r.detalle});
+    });
+  });
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(filas), 'Ciclo renovado');
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(registroRows.length?registroRows:[{'Cliente':'','Localidad':'','Fecha':'','Detalle':''}]), 'Registro de fechas');
+
+  const base64 = XLSX.write(wb, {bookType:'xlsx', type:'base64'});
+  const boundary = 'mant_hist_boundary';
+  const metadata = {name:`historial_mantenimientos_${todayStr()}.xlsx`, mimeType:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'};
+  const body =
+    `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${JSON.stringify(metadata)}\r\n`+
+    `--${boundary}\r\nContent-Type: application/vnd.openxmlformats-officedocument.spreadsheetml.sheet\r\nContent-Transfer-Encoding: base64\r\n\r\n${base64}\r\n--${boundary}--`;
+  const res = await fetch(`https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart`, {
+    method:'POST',
+    headers:{Authorization:`Bearer ${gAccessToken}`, 'Content-Type': `multipart/related; boundary=${boundary}`},
+    body
+  });
+  if(!res.ok) throw new Error('HTTP '+res.status);
+}
+
 function mostrarBannerRenovacion(list){
   const banner = document.getElementById('renewalBanner');
   banner.style.display = 'flex';
   const n = list.length;
   banner.innerHTML = `
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
-    <p>Hay ${n} mantenimiento${n===1?'':'s'} resuelto${n===1?'':'s'} listo${n===1?'':'s'} para renovarse al mes nuevo (vuelve${n===1?'':'n'} a Pendiente para el próximo ciclo).</p>
+    <p>Hay ${n} mantenimiento${n===1?'':'s'} resuelto${n===1?'':'s'} listo${n===1?'':'s'} para renovarse al mes nuevo (vuelve${n===1?'':'n'} a Pendiente para el próximo ciclo). Antes de renovar, se guarda un historial de este ciclo en Drive.</p>
     <div class="rb-btns">
       <button id="renewalApplyBtn">Renovar ahora</button>
       <button class="rb-dismiss" id="renewalDismissBtn">Todavía no</button>
     </div>
   `;
-  document.getElementById('renewalApplyBtn').addEventListener('click', ()=>{
+  const aplicarYCerrar = ()=>{
     aplicarRenovaciones(list);
     banner.style.display = 'none';
     renderAll();
+  };
+  document.getElementById('renewalApplyBtn').addEventListener('click', (ev)=>{
+    const btn = ev.currentTarget;
+    btn.disabled = true;
+    btn.textContent = 'Guardando historial…';
+    if(typeof XLSX === 'undefined'){
+      if(confirm('No se pudo cargar Excel (revisá la conexión). ¿Renovar igual, sin guardar el historial en Drive?')) aplicarYCerrar();
+      else { btn.disabled=false; btn.textContent='Renovar ahora'; }
+      return;
+    }
+    ensureGoogleAuth(async ()=>{
+      try{
+        await subirHistorialRenovacion(list);
+        aplicarYCerrar();
+      }catch(e){
+        console.error(e);
+        if(confirm('No se pudo guardar el historial en Drive. ¿Renovar igual, sin guardar esa copia?')) aplicarYCerrar();
+        else { btn.disabled=false; btn.textContent='Renovar ahora'; }
+      }
+    }, ()=>{
+      if(confirm('No se pudo conectar con Google para guardar el historial. ¿Renovar igual, sin guardar esa copia?')) aplicarYCerrar();
+      else { btn.disabled=false; btn.textContent='Renovar ahora'; }
+    });
   });
   document.getElementById('renewalDismissBtn').addEventListener('click', ()=>{
     banner.style.display = 'none';
